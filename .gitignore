@@ -1,0 +1,13 @@
+# --- Secretos: NO subir (usa los .example.h como plantilla) ---
+totp_accounts.h
+settings.h
+
+# --- Artefactos de compilación de Arduino ---
+/build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# --- Sistema ---
+.DS_Store
