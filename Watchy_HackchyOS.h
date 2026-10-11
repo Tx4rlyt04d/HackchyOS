@@ -41,12 +41,14 @@ private:
   // --- mini-OS ---
   void runApps();                            // bucle interactivo mientras hay una app abierta
   void monitorSample();                       // una ventana de escucha del monitor (firmware)
+  void stopMonitorRadio();                    // apaga promiscuo+WiFi (BACK y timeout la comparten)
   void bleScan();                             // una ronda de escaneo BLE pasivo (firmware)
   const char *bleVendor(uint16_t cid);        // fabricante por company id de BLE
   const char *trkLabel(uint8_t kind);         // etiqueta del tipo de tracker
   void openApp(AppId id);
   void renderCurrent();                       // dibuja la pantalla según hackState
   bool alarmDue();                            // ¿toca sonar el despertador?
+  void checkAlarm();                          // vibra si toca (esfera y runApps comparten)
 
   // --- esfera (igual que HackTerm) ---
   void updateStepLog(uint32_t steps);
