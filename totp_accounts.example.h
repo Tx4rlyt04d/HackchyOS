@@ -18,4 +18,9 @@ static const TotpAccount TOTP_ACCOUNTS[] = {
 };
 static const int TOTP_COUNT = sizeof(TOTP_ACCOUNTS) / sizeof(TOTP_ACCOUNTS[0]);
 
+// La app 2fa indexa TOTP_ACCOUNTS[totpSel] y hace "% TOTP_COUNT": con la lista
+// vacía eso es una división por cero. Si borras el ejemplo, deja al menos una
+// cuenta (puedes dejarla desactivada/falsa, pero no la lista vacía).
+static_assert(TOTP_COUNT > 0, "TOTP_ACCOUNTS no puede estar vacio");
+
 #endif

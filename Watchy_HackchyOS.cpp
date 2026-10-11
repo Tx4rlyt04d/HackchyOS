@@ -5,6 +5,7 @@
 #ifndef HACKCHYOS_SIM
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_arduino_version.h>  // ESP_ARDUINO_VERSION_MAJOR: firma de BLEScan::start() cambia entre cores
 #include <BLEDevice.h>      // BLE "Bluedroid" del core ESP32 (el mismo que ya usa Watchy)
 #include <BLEScan.h>        // -> no uses NimBLE: choca con el BLE que incluye Watchy
 #endif
@@ -146,7 +147,8 @@ void WatchyHackchyOS::monitorSample() {
   if (monHop) monChan = monChan < 13 ? monChan + 1 : 1;
   esp_wifi_set_channel(monChan, WIFI_SECOND_CHAN_NONE);
   cBeacon = cProbe = cData = cDeauth = cOther = 0;
-  delay(850);                                  // ventana de escucha
+  delay(1000);                                 // ventana de escucha: 1 s en punto,
+                                                // para que "tramas/s" sea literal
   monBeacon = cBeacon; monProbe = cProbe; monData = cData;
   monDeauth = cDeauth; monOther = cOther;
   monTotal  = monBeacon + monProbe + monData + monDeauth + monOther;
@@ -232,6 +234,7 @@ void WatchyHackchyOS::runApps() {
 
   uint32_t last = millis();
   uint32_t lastTick = 0;
+  uint32_t alarmTick = 0;
   bool dirty = true;
 
   while (millis() - last < TIMEOUT) {
@@ -290,8 +293,12 @@ void WatchyHackchyOS::runApps() {
           if (up)   { almM = (almM + 5) % 60; }
           if (down) { almH = (almH + 1) % 24; }
           if (back) {
-            if (digitalRead(BACK_BTN_PIN) == 1) { almOn = !almOn; } // toque largo -> alarma on/off
-            hackState = HS_LAUNCHER;
+            // mide la pulsación real: toque largo (>=600 ms) alterna la
+            // alarma y se queda en la pantalla; toque corto sale como siempre
+            uint32_t t0 = millis();
+            while (digitalRead(BACK_BTN_PIN) == 1 && millis() - t0 < 2000) delay(10);
+            if (millis() - t0 >= 600) almOn = !almOn;
+            else                      hackState = HS_LAUNCHER;
           }
           break;
       }
@@ -320,7 +327,20 @@ void WatchyHackchyOS::runApps() {
       renderCurrent();
       display.display(true);
     }
+
+    // el despertador debe sonar aunque estemos dentro de una app, no solo en la esfera
+    if (millis() - alarmTick >= 1000) {
+      alarmTick = millis();
+      RTC.read(currentTime);
+      if (alarmDue()) for (uint8_t i = 0; i < 4; i++) vibMotor(75, 4);
+    }
     delay(40);
+  }
+  // si el timeout nos saca estando en el monitor, apaga el modo promiscuo
+  // igual que hace la salida por BACK (si no, la radio se queda escuchando)
+  if (hackState == HS_MON) {
+    esp_wifi_set_promiscuous(false);
+    WiFi.mode(WIFI_OFF);
   }
   hackState = HS_WATCHFACE;
   showWatchFace(true);
@@ -507,7 +527,8 @@ void WatchyHackchyOS::drawWiFi() {
   panel(L, 5, R, 32);
   title(L + 6, 5, "wifi");
   char hdr[16];
-  snprintf(hdr, sizeof(hdr), wifiView ? "canales" : "%d redes", wifiCount);
+  if (wifiView) strcpy(hdr, "canales");
+  else          snprintf(hdr, sizeof(hdr), "%d redes", wifiCount);
   title(R - 6, 5, hdr, true);
 
   if (wifiCount == 0) {
@@ -786,7 +807,12 @@ void WatchyHackchyOS::bleScan() {
   scan->setActiveScan(false);            // PASIVO: solo escucha, no pide scan-response
   scan->setInterval(100);
   scan->setWindow(99);
-  BLEScanResults *res = scan->start(5, false);   // core 3.x: devuelve puntero
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  BLEScanResults *res = scan->start(5, false);   // core 3.x: start() devuelve puntero
+#else
+  BLEScanResults resVal = scan->start(5, false); // core 2.x: start() devuelve por valor
+  BLEScanResults *res = &resVal;
+#endif
   int n = res->getCount();
   bleCount = n > 16 ? 16 : n;
   uint64_t now = unixUTC();
@@ -868,8 +894,18 @@ void WatchyHackchyOS::drawBluetooth() {
     panel(L, 66, R, 172);
     const int16_t rh = 26, y0 = 80;
     int shown = trkCount < 4 ? trkCount : 4;
-    for (int i = 0; i < shown; i++) {
-      int16_t y = y0 + i * rh;
+    // solo caben 4 filas: si hay un tracker marcado como "te están siguiendo"
+    // (bleWorstTrk), que vaya primero para que nunca quede fuera de la vista
+    int order[8];
+    {
+      int oi = 0;
+      if (bleWorstTrk >= 0 && bleWorstTrk < trkCount) order[oi++] = bleWorstTrk;
+      for (int i = 0; i < trkCount && oi < 8; i++)
+        if (i != bleWorstTrk) order[oi++] = i;
+    }
+    for (int r = 0; r < shown; r++) {
+      int i = order[r];
+      int16_t y = y0 + r * rh;
       if (i == bleWorstTrk) display.fillRect(L + 4, y - 7, 3, 18, fg());
       display.setFont(&Spleen6x12);
       display.setCursor(L + 12, y);
