@@ -22,7 +22,8 @@ por horas, fase lunar y pasos de ayer.
 
 Requiere Arduino IDE con:
 
-1. **Core ESP32** (Espressif) 2.0.5+ (probado con 3.3.x).
+1. **Core ESP32** (Espressif) 2.0.5+ (probado con 3.3.x; el código soporta la
+   diferencia de API de `BLEScan::start()` entre 2.x y 3.x).
 2. Librerías: **Watchy** (SQFMI) y **Rtc_Pcf8563**. El BLE lo aporta el core, no
    instales NimBLE (choca con el BLE que incluye Watchy).
 
@@ -43,6 +44,12 @@ cp totp_accounts.example.h totp_accounts.h
 
 > `settings.h` y `totp_accounts.h` contienen secretos y están en `.gitignore`:
 > no se suben al repositorio.
+
+> **Aviso:** eso protege el repositorio, no el dispositivo. Los secretos TOTP
+> se compilan dentro del firmware y quedan en claro en la flash del ESP32; un
+> volcado del chip (JTAG/USB con acceso físico) los expone. No hay almacenamiento
+> cifrado ni PIN de bloqueo: trata la Watchy como tratarías cualquier dispositivo
+> con tus setup keys de 2FA guardadas sin cifrar.
 
 Abre `HackchyOS.ino` y pulsa Upload con la Watchy encendida y conectada.
 
