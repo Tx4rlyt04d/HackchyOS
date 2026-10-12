@@ -20,6 +20,12 @@
 #ifndef POMO_BREAK_MIN
 #define POMO_BREAK_MIN  5
 #endif
+#ifndef DEAUTH_MAX_SECONDS
+#define DEAUTH_MAX_SECONDS 60  // autocorte de seguridad: nunca se queda transmitiendo sola
+#endif
+#ifndef BLESPAM_MAX_SECONDS
+#define BLESPAM_MAX_SECONDS 60 // idem para el spam BLE
+#endif
 // ---------------------------------------------------------------------------
 
 class WatchyHackchyOS : public Watchy {
@@ -36,12 +42,18 @@ public:
   void drawPomodoro();
   void drawMonitor();
   void drawBluetooth();
+  void drawDeauth();
+  void drawBleSpam();
 
 private:
   // --- mini-OS ---
   void runApps();                            // bucle interactivo mientras hay una app abierta
   void monitorSample();                       // una ventana de escucha del monitor (firmware)
   void stopMonitorRadio();                    // apaga promiscuo+WiFi (BACK y timeout la comparten)
+  void deauthBurst();                         // ráfaga de tramas deauth (firmware; solo tu red)
+  void stopDeauth();                          // corta la transmisión y apaga la radio
+  void bleSpamBurst();                        // ráfaga de anuncios BLE falsos (firmware)
+  void stopBleSpam();                         // corta la transmisión y apaga BLE
   void bleScan();                             // una ronda de escaneo BLE pasivo (firmware)
   const char *bleVendor(uint16_t cid);        // fabricante por company id de BLE
   const char *trkLabel(uint8_t kind);         // etiqueta del tipo de tracker

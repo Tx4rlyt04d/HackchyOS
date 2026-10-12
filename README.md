@@ -2,7 +2,8 @@
 
 Mini-OS para el smartwatch [Watchy](https://watchy.sqfmi.com/) (ESP32, e-paper 200×200).
 Sobre la esfera normal añade un lanzador con varias apps, todas con estética de
-terminal (fuente Spleen) y pensadas para **escuchar, no emitir**.
+terminal (fuente Spleen) y pensadas, salvo dos excepciones explícitas, para
+**escuchar, no emitir**.
 
 ## Apps
 
@@ -11,6 +12,23 @@ terminal (fuente Spleen) y pensadas para **escuchar, no emitir**.
   fabricante por OUI y ocupación de canales.
 - **monitor 802.11** — modo promiscuo pasivo: cuenta beacon/probe/data/deauth y avisa
   de tormentas de deauth. Solo escucha, nunca transmite.
+- **deauth test** — ⚠️ **única app que transmite.** Envía tramas de deauth 802.11 al
+  punto de acceso que elijas de la lista del escáner wifi, para probar cómo
+  reacciona tu propia red/dispositivos. Nunca arranca sola (hay que pulsar MENU
+  para armarla), se corta a los 60s aunque no la pares tú (`DEAUTH_MAX_SECONDS`)
+  y la ráfaga está limitada a propósito. **Úsala solo contra redes y dispositivos
+  de tu propiedad o con autorización explícita** (igual que pide el proyecto del
+  que toma la idea, [ESP8266 Deauther](https://deauther.com)); es un ataque de
+  denegación de servicio y en muchas jurisdicciones usarlo contra terceros es
+  ilegal.
+- **ble spam** — ⚠️ **también transmite, y sin objetivo.** Emite anuncios BLE que
+  imitan un company ID real (Apple/Samsung/Google) para mostrar que cualquiera
+  puede anunciarse como un dispositivo BLE sin autenticación — a diferencia del
+  deauth, **no eliges a quién afecta**: lo recibe cualquier móvil BLE cercano,
+  no solo los tuyos. Mismas barreras (autocorte `BLESPAM_MAX_SECONDS`, armado
+  manual con MENU, ráfaga limitada). Para una demo, úsala en una sala
+  controlada y avisa antes a quien esté dentro: a varios les saltarán popups
+  de emparejamiento sin que lo pidan.
 - **bluetooth** — escáner BLE pasivo + detector de trackers (AirTag/Find My, Samsung
   SmartTag, Tile) con aviso de "te están siguiendo", y vista de densidad por RSSI.
 - **pomodoro** — temporizador foco/descanso + despertador.
