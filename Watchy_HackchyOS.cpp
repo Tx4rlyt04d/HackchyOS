@@ -154,6 +154,13 @@ void WatchyHackchyOS::monitorSample() {
   monTotal  = monBeacon + monProbe + monData + monDeauth + monOther;
   monAlert  = monDeauth >= 10;                  // umbral de tormenta de deauth
 }
+
+// Apaga la radio del monitor. Única copia: la llaman tanto la salida por
+// BACK como la salida por timeout de inactividad, para que ninguna se olvide.
+void WatchyHackchyOS::stopMonitorRadio() {
+  esp_wifi_set_promiscuous(false);
+  WiFi.mode(WIFI_OFF);
+}
 #endif
 
 // ===========================================================================
@@ -179,11 +186,17 @@ void WatchyHackchyOS::drawWatchFace() {
   drawYesterdayPanel();
 
 #ifndef HACKCHYOS_SIM
-  if (alarmDue()) {
-    for (uint8_t i = 0; i < 4; i++) vibMotor(75, 4);  // tanda de vibración
-  }
+  checkAlarm();
 #endif
 }
+
+#ifndef HACKCHYOS_SIM
+// Única copia de la tanda de vibración: la llaman tanto la esfera como el
+// tick de 1s de runApps() (para que suene también dentro de una app).
+void WatchyHackchyOS::checkAlarm() {
+  if (alarmDue()) for (uint8_t i = 0; i < 4; i++) vibMotor(75, 4);
+}
+#endif
 
 bool WatchyHackchyOS::alarmDue() {
   if (!almOn) return false;
@@ -216,6 +229,23 @@ void WatchyHackchyOS::handleButtonPress() {
 #endif
 }
 
+#ifndef HACKCHYOS_SIM
+// ¿hay algún botón físicamente pulsado ahora mismo?
+static bool anyBtnPressed() {
+  return digitalRead(MENU_BTN_PIN) == 1 || digitalRead(BACK_BTN_PIN) == 1 ||
+         digitalRead(UP_BTN_PIN)   == 1 || digitalRead(DOWN_BTN_PIN) == 1;
+}
+
+// Bloquea hasta que se suelten los botones (o hasta maxMs, por si uno se queda
+// pegado). Devuelve cuánto ha durado la espera, útil para medir pulsaciones
+// largas (toque vs. toque mantenido).
+static uint32_t waitForRelease(uint32_t maxMs = 0xFFFFFFFF) {
+  uint32_t t0 = millis();
+  while (anyBtnPressed() && millis() - t0 < maxMs) delay(10);
+  return millis() - t0;
+}
+#endif
+
 // Bucle interactivo: se mantiene despierto mientras se usa una app y vuelve a la
 // esfera (deep sleep) tras 'TIMEOUT' sin pulsaciones o al salir con ATRÁS.
 void WatchyHackchyOS::runApps() {
@@ -229,12 +259,10 @@ void WatchyHackchyOS::runApps() {
 
   // no proceses el botón que nos despertó: espera a soltarlo (si no, la pulsación
   // de UP que abre el lanzador movería la selección de la 1 a la última)
-  while (digitalRead(MENU_BTN_PIN) == 1 || digitalRead(BACK_BTN_PIN) == 1 ||
-         digitalRead(UP_BTN_PIN)   == 1 || digitalRead(DOWN_BTN_PIN) == 1) delay(10);
+  waitForRelease();
 
   uint32_t last = millis();
   uint32_t lastTick = 0;
-  uint32_t alarmTick = 0;
   bool dirty = true;
 
   while (millis() - last < TIMEOUT) {
@@ -273,10 +301,7 @@ void WatchyHackchyOS::runApps() {
           if (up)   monChan = monChan < 13 ? monChan + 1 : 1;
           if (down) monChan = monChan > 1  ? monChan - 1 : 13;
           if (back) {
-#ifndef HACKCHYOS_SIM
-            esp_wifi_set_promiscuous(false);
-            WiFi.mode(WIFI_OFF);
-#endif
+            stopMonitorRadio();
             hackState = HS_LAUNCHER;
           }
           break;
@@ -295,53 +320,45 @@ void WatchyHackchyOS::runApps() {
           if (back) {
             // mide la pulsación real: toque largo (>=600 ms) alterna la
             // alarma y se queda en la pantalla; toque corto sale como siempre
-            uint32_t t0 = millis();
-            while (digitalRead(BACK_BTN_PIN) == 1 && millis() - t0 < 2000) delay(10);
-            if (millis() - t0 >= 600) almOn = !almOn;
-            else                      hackState = HS_LAUNCHER;
+            uint32_t held = waitForRelease(2000);
+            if (held >= 600) almOn = !almOn;
+            else             hackState = HS_LAUNCHER;
           }
           break;
       }
       renderCurrent();
       display.display(true);
-      while (digitalRead(MENU_BTN_PIN) == 1 || digitalRead(BACK_BTN_PIN) == 1 ||
-             digitalRead(UP_BTN_PIN) == 1 || digitalRead(DOWN_BTN_PIN) == 1) delay(10);
+      waitForRelease();
       dirty = false;
     }
 
     if (dirty) { renderCurrent(); display.display(true); dirty = false; }
 
-    // apps que avanzan solas: refresco cada segundo
-    bool live = (hackState == HS_TOTP) || (hackState == HS_MON) ||
-                (hackState == HS_POMO && pomoRun);
-    if (live && millis() - lastTick >= 1000) {
+    // una vez por segundo: primero el despertador (debe sonar aunque estemos
+    // dentro de una app, no solo en la esfera), luego las apps que avanzan solas
+    if (millis() - lastTick >= 1000) {
       lastTick = millis();
       RTC.read(currentTime);             // hora fresca: el TOTP cuenta atrás de verdad
-      if (hackState == HS_POMO && pomoRun && --pomoLeft <= 0) {
-        vibMotor(100, 6);
-        pomoBreak = !pomoBreak;
-        if (!pomoBreak) pomoCycles++;
-        pomoLeft = (pomoBreak ? POMO_BREAK_MIN : POMO_WORK_MIN) * 60;
+      checkAlarm();
+      bool live = (hackState == HS_TOTP) || (hackState == HS_MON) ||
+                  (hackState == HS_POMO && pomoRun);
+      if (live) {
+        if (hackState == HS_POMO && pomoRun && --pomoLeft <= 0) {
+          vibMotor(100, 6);
+          pomoBreak = !pomoBreak;
+          if (!pomoBreak) pomoCycles++;
+          pomoLeft = (pomoBreak ? POMO_BREAK_MIN : POMO_WORK_MIN) * 60;
+        }
+        if (hackState == HS_MON) monitorSample();
+        renderCurrent();
+        display.display(true);
       }
-      if (hackState == HS_MON) monitorSample();
-      renderCurrent();
-      display.display(true);
-    }
-
-    // el despertador debe sonar aunque estemos dentro de una app, no solo en la esfera
-    if (millis() - alarmTick >= 1000) {
-      alarmTick = millis();
-      RTC.read(currentTime);
-      if (alarmDue()) for (uint8_t i = 0; i < 4; i++) vibMotor(75, 4);
     }
     delay(40);
   }
   // si el timeout nos saca estando en el monitor, apaga el modo promiscuo
   // igual que hace la salida por BACK (si no, la radio se queda escuchando)
-  if (hackState == HS_MON) {
-    esp_wifi_set_promiscuous(false);
-    WiFi.mode(WIFI_OFF);
-  }
+  if (hackState == HS_MON) stopMonitorRadio();
   hackState = HS_WATCHFACE;
   showWatchFace(true);
 #endif
@@ -896,11 +913,11 @@ void WatchyHackchyOS::drawBluetooth() {
     int shown = trkCount < 4 ? trkCount : 4;
     // solo caben 4 filas: si hay un tracker marcado como "te están siguiendo"
     // (bleWorstTrk), que vaya primero para que nunca quede fuera de la vista
-    int order[8];
+    int order[4];
     {
       int oi = 0;
       if (bleWorstTrk >= 0 && bleWorstTrk < trkCount) order[oi++] = bleWorstTrk;
-      for (int i = 0; i < trkCount && oi < 8; i++)
+      for (int i = 0; i < trkCount && oi < shown; i++)
         if (i != bleWorstTrk) order[oi++] = i;
     }
     for (int r = 0; r < shown; r++) {
