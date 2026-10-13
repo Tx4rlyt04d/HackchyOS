@@ -212,12 +212,24 @@ void WatchyHackchyOS::deauthBurst() {
   wifi_second_chan_t secondChan;             // solo para rellenar el parámetro; no se usa
   esp_wifi_get_channel(&deauthRealChan, &secondChan);
   deauthWifiStatus = (int32_t)WiFi.status();  // ¿seguimos asociados a algo? (diagnóstico)
+
+  // DIAGNÓSTICO: volcado completo por si el log interno del driver WiFi (que
+  // normalmente explica por qué rechaza una trama) no sale con el nivel de
+  // depuración por defecto. Solo una vez por ráfaga, no por cada trama.
+  Serial.printf("[deauth] ch=%d real=%d wifiStatus=%d len=%u en_sys_seq=1 frame=",
+                wifiChan[deauthSel], deauthRealChan, (int)deauthWifiStatus,
+                (unsigned)sizeof(deauthFrame));
+  for (size_t i = 0; i < sizeof(deauthFrame); i++) Serial.printf("%02X ", deauthFrame[i]);
+  Serial.println();
+
   for (int i = 0; i < 10; i++) {
     // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
     // levantada y se pasa false, esp_wifi_80211_tx devuelve ESP_ERR_INVALID_ARG
     // y NO envía nada. Con true deja que el driver ponga el nº de secuencia.
     esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), true);
     deauthLastErr = (int32_t)err;          // diagnóstico: se ve en la pantalla
+    if (i == 0) Serial.printf("[deauth] esp_wifi_80211_tx -> 0x%x (%s)\n",
+                              (int)err, esp_err_to_name(err));
     if (err == ESP_OK) deauthSent++;
     delay(5);
   }
