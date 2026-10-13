@@ -83,6 +83,7 @@ RTC_DATA_ATTR int      deauthSel     = 0;      // índice en el array de wifi
 RTC_DATA_ATTR bool     deauthRunning = false;
 RTC_DATA_ATTR uint32_t deauthSent    = 0;      // tramas enviadas en esta sesión
 RTC_DATA_ATTR int32_t  deauthLeft    = 0;      // segundos hasta el autocorte
+RTC_DATA_ATTR int32_t  deauthLastErr = 0;      // último esp_err_t de esp_wifi_80211_tx (diagnóstico)
 
 // Spam BLE: anuncios falsos (sin objetivo, afecta a cualquiera que esté cerca)
 RTC_DATA_ATTR int      bleSpamMode    = 0;      // plantilla elegida (ver BLESPAM_NAMES)
@@ -209,8 +210,9 @@ void WatchyHackchyOS::deauthBurst() {
     // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
     // levantada y se pasa false, esp_wifi_80211_tx devuelve ESP_ERR_INVALID_ARG
     // y NO envía nada. Con true deja que el driver ponga el nº de secuencia.
-    if (esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), true) == ESP_OK)
-      deauthSent++;
+    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), true);
+    deauthLastErr = (int32_t)err;          // diagnóstico: se ve en la pantalla
+    if (err == ESP_OK) deauthSent++;
     delay(5);
   }
 }
@@ -932,6 +934,10 @@ void WatchyHackchyOS::drawDeauth() {
     snprintf(st, sizeof(st), "%lu tramas  corte en %lds",
              (unsigned long)deauthSent, (long)deauthLeft);
     centerText(100, 140, st);
+    if (deauthSent == 0) {                   // diagnóstico: por qué no sale nada
+      char err[24]; snprintf(err, sizeof(err), "err esp_wifi: 0x%lx", (long)deauthLastErr);
+      centerText(100, 154, err);
+    }
   } else {
     title(L + 6, 102, "estado");
     display.setFont(&Spleen6x12);
