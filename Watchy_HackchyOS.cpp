@@ -263,7 +263,8 @@ static void bleSpamOne(const BleSpamTemplate &tpl) {
   BLEAdvertising *adv = BLEDevice::getAdvertising();
   adv->setAdvertisementData(advData);
   adv->start();
-  delay(20);
+  delay(100);   // deja tiempo a que el comando asíncrono de configuración
+                // llegue al controlador y salgan varios anuncios de verdad
   adv->stop();
 }
 
@@ -569,6 +570,10 @@ void WatchyHackchyOS::openApp(AppId id) {
       if (deauthSel >= wifiCount) deauthSel = 0;
       WiFi.mode(WIFI_STA);
       WiFi.disconnect();
+      // sin esto, el ahorro de energía por defecto (WIFI_PS_MIN_MODEM) dormita
+      // el radio entre operaciones: esp_wifi_80211_tx() puede devolver ESP_OK
+      // sin que la trama llegue a salir por el aire. Imprescindible para TX.
+      esp_wifi_set_ps(WIFI_PS_NONE);
       break;
     case APP_BLESPAM:
       // nunca empieza a transmitir sola, hay que armarla con MENU
@@ -577,6 +582,11 @@ void WatchyHackchyOS::openApp(AppId id) {
       bleSpamSent = 0;
       WiFi.mode(WIFI_OFF);              // coexistencia: libera la radio para BLE
       BLEDevice::init("");
+      // sin esto, el intervalo de advertising por defecto (del orden de
+      // segundos) deja la ventana de la ráfaga (ver bleSpamOne) demasiado
+      // corta para que llegue a salir ni un solo anuncio por el aire.
+      BLEDevice::getAdvertising()->setMinInterval(0x20);  // 0x20*0.625ms = 20ms
+      BLEDevice::getAdvertising()->setMaxInterval(0x40);  // 0x40*0.625ms = 40ms
       break;
     case APP_BLE:
       hackState = HS_BLE;
