@@ -563,7 +563,11 @@ void WatchyHackchyOS::openApp(AppId id) {
       monBeacon = monProbe = monData = monDeauth = monOther = monTotal = 0;
       monAlert = false;
       WiFi.mode(WIFI_STA);
-      WiFi.disconnect();
+      // ver nota en APP_DEAUTH: sin esto, la reconexión en segundo plano a la
+      // red configurada puede devolver el radio a su canal antes de que
+      // monitorSample() termine de escuchar en el canal que tocaba
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false, true);
       esp_wifi_set_promiscuous(true);
       esp_wifi_set_promiscuous_rx_cb(&sniffCB);
       break;
@@ -575,7 +579,12 @@ void WatchyHackchyOS::openApp(AppId id) {
       deauthSent = 0;
       if (deauthSel >= wifiCount) deauthSel = 0;
       WiFi.mode(WIFI_STA);
-      WiFi.disconnect();
+      // Watchy guarda credenciales WiFi reales (las del asistente, para clima/
+      // NTP). Sin desactivar la reconexión y borrar el AP configurado, el
+      // driver reintenta solo en segundo plano y nos devuelve al canal de esa
+      // red antes de poder transmitir en el canal del objetivo.
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false, true);   // false=no apaga el radio, true=olvida el AP
       // sin esto, el ahorro de energía por defecto (WIFI_PS_MIN_MODEM) dormita
       // el radio entre operaciones: esp_wifi_80211_tx() puede devolver ESP_OK
       // sin que la trama llegue a salir por el aire. Imprescindible para TX.
