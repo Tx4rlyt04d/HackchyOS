@@ -206,8 +206,11 @@ void WatchyHackchyOS::deauthBurst() {
   memcpy(deauthFrame + 16, bssid, 6);
   esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
   for (int i = 0; i < 10; i++) {
-    esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), false);
-    deauthSent++;
+    // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
+    // levantada y se pasa false, esp_wifi_80211_tx devuelve ESP_ERR_INVALID_ARG
+    // y NO envía nada. Con true deja que el driver ponga el nº de secuencia.
+    if (esp_wifi_80211_tx(WIFI_IF_STA, deauthFrame, sizeof(deauthFrame), true) == ESP_OK)
+      deauthSent++;
     delay(5);
   }
 }
@@ -246,7 +249,17 @@ static void bleSpamOne(const BleSpamTemplate &tpl) {
   };
   BLEAdvertisementData advData;
   advData.setFlags(0x06);                     // LE General Discoverable, sin BR/EDR
+  // El core ESP32 3.x pide Arduino String; el 2.x pedía std::string. Los datos
+  // llevan bytes 0x00, así que construimos el buffer byte a byte (no desde un
+  // char* que se cortaría en el primer nulo).
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  String mfg;
+  mfg.reserve(sizeof(md));
+  for (size_t i = 0; i < sizeof(md); i++) mfg += (char)md[i];
+  advData.setManufacturerData(mfg);
+#else
   advData.setManufacturerData(std::string((char *)md, sizeof(md)));
+#endif
   BLEAdvertising *adv = BLEDevice::getAdvertising();
   adv->setAdvertisementData(advData);
   adv->start();
