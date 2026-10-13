@@ -86,6 +86,7 @@ RTC_DATA_ATTR int32_t  deauthLeft    = 0;      // segundos hasta el autocorte
 RTC_DATA_ATTR int32_t  deauthLastErr = 0;      // último esp_err_t de esp_wifi_80211_tx (diagnóstico)
 RTC_DATA_ATTR int32_t  deauthChanErr = 0;      // retorno de esp_wifi_set_channel (diagnóstico)
 RTC_DATA_ATTR uint8_t  deauthRealChan = 0;     // canal que el radio dice tener activo (diagnóstico)
+RTC_DATA_ATTR int32_t  deauthWifiStatus = 0;   // WiFi.status(): ¿seguimos asociados a algo? (diagnóstico)
 
 // Spam BLE: anuncios falsos (sin objetivo, afecta a cualquiera que esté cerca)
 RTC_DATA_ATTR int      bleSpamMode    = 0;      // plantilla elegida (ver BLESPAM_NAMES)
@@ -210,6 +211,7 @@ void WatchyHackchyOS::deauthBurst() {
   deauthChanErr = (int32_t)esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
   wifi_second_chan_t secondChan;             // solo para rellenar el parámetro; no se usa
   esp_wifi_get_channel(&deauthRealChan, &secondChan);
+  deauthWifiStatus = (int32_t)WiFi.status();  // ¿seguimos asociados a algo? (diagnóstico)
   for (int i = 0; i < 10; i++) {
     // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
     // levantada y se pasa false, esp_wifi_80211_tx devuelve ESP_ERR_INVALID_ARG
@@ -223,6 +225,7 @@ void WatchyHackchyOS::deauthBurst() {
 
 void WatchyHackchyOS::stopDeauth() {
   deauthRunning = false;
+  esp_wifi_set_promiscuous(false);
   WiFi.mode(WIFI_OFF);
 }
 
@@ -589,6 +592,11 @@ void WatchyHackchyOS::openApp(AppId id) {
       // el radio entre operaciones: esp_wifi_80211_tx() puede devolver ESP_OK
       // sin que la trama llegue a salir por el aire. Imprescindible para TX.
       esp_wifi_set_ps(WIFI_PS_NONE);
+      // DIAGNÓSTICO (2ª vuelta): la primera prueba de promiscuo no tenía aún
+      // el diagnóstico de canal/WiFi.status() delante, así que no sabíamos si
+      // de verdad arreglaba el canal aunque el error de TX siguiera igual.
+      // Lo repetimos ahora que sí podemos verlo.
+      esp_wifi_set_promiscuous(true);
       break;
     case APP_BLESPAM:
       // nunca empieza a transmitir sola, hay que armarla con MENU
@@ -952,9 +960,9 @@ void WatchyHackchyOS::drawDeauth() {
       snprintf(err, sizeof(err), "tx:0x%lx chSet:0x%lx",
                (long)deauthLastErr, (long)deauthChanErr);
       centerText(100, 152, err);
-      char chn[20];
-      snprintf(chn, sizeof(chn), "ch pedido %d real %d",
-               wifiChan[deauthSel], deauthRealChan);
+      char chn[28];
+      snprintf(chn, sizeof(chn), "ch %d/%d  wifi.status:%ld",
+               wifiChan[deauthSel], deauthRealChan, (long)deauthWifiStatus);
       centerText(100, 164, chn);
     }
   } else {
