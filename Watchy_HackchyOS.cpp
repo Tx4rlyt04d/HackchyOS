@@ -569,6 +569,10 @@ void WatchyHackchyOS::openApp(AppId id) {
       if (deauthSel >= wifiCount) deauthSel = 0;
       WiFi.mode(WIFI_STA);
       WiFi.disconnect();
+      // sin esto, el ahorro de energía por defecto (WIFI_PS_MIN_MODEM) dormita
+      // el radio entre operaciones: esp_wifi_80211_tx() puede devolver ESP_OK
+      // sin que la trama llegue a salir por el aire. Imprescindible para TX.
+      esp_wifi_set_ps(WIFI_PS_NONE);
       break;
     case APP_BLESPAM:
       // nunca empieza a transmitir sola, hay que armarla con MENU
